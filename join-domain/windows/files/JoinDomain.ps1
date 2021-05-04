@@ -125,15 +125,6 @@ Function Get-LdapConnection
 
 }
 
-Function Get-DomainJoinStatus
-{
-    #Return the domain name if found, else return null
-    if(((Get-WmiObject Win32_ComputerSystem).partofdomain) -eq $True)
-    {
-        return (Get-WmiObject Win32_ComputerSystem).domain
-    }
-}
-
 Function Find-LdapObject
 {
     Param(
@@ -584,62 +575,87 @@ Function xAdd-Computer
 
 #JoinDomain Main
 
-#Check local system for domain join status.
-$DomainJoinStatus = Get-DomainJoinStatus -DomainFQDN $DomainName
-if($DomainJoinStatus -eq $null)
+#Create the credential from the Password parameter set
+if($PSCmdlet.ParameterSetName -eq "Password")
 {
-    #If the object is found, remove it, else add the computer to the domain.
-    #Create the credential from the Password parameter set
-    if($PSCmdlet.ParameterSetName -eq "Password")
-    {
-        $SecPassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
-        $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $UserName, $SecPassword
-    }
-    else
-    {
-        #Create the credential from the EncryptedPassword parameter set
-        $AesObject = New-Object System.Security.Cryptography.AesCryptoServiceProvider
-        $AesObject.IV = New-Object Byte[]($AesObject.IV.Length)
-        $AesObject.Key = [System.Convert]::FromBase64String($Key)
-        $EncryptedStringBytes = [System.Convert]::FromBase64String($EncryptedPassword)
-        $ReEncryptedPassword = ConvertTo-SecureString -String "$([System.Text.UnicodeEncoding]::Unicode.GetString(($AesObject.CreateDecryptor()).TransformFinalBlock($EncryptedStringBytes, 0, $EncryptedStringBytes.Length)))" -AsPlainText -Force
-        $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $UserName, $ReEncryptedPassword
-    }
-
-    #Create the ldap connection
-    $Ldap = Get-LdapConnection -LdapServer:$DomainName -Credential:$cred
-
-    #Create search filter using the Local Computer's NetBIOS Name
-    #https://social.msdn.microsoft.com/Forums/en-US/a5690438-d9bc-4f47-b1c6-bcb35cc2d074/how-to-get-changed-computer-name-without-restarting-the-computer?forum=netfxbcl
-    $ControlSetNumber = (Get-ItemProperty -path HKLM:SYSTEM\Select).Current.ToString().PadLeft(3, "0")
-    $ComputerName = (get-itemproperty -path HKLM:SYSTEM\ControlSet$ControlSetNumber\Control\ComputerName\ComputerName).ComputerName
-    $SearchFilter = "(&(cn=$ComputerName)(objectClass=computer))"
-
-    #Convert domain name to common name
-    $OUSearchBase = 'dc=' + $DomainName.Replace('.',',dc=')
-
-    #Run LDAP search
-    $result = Find-LdapObject -LdapConnection:$Ldap -SearchFilter:$SearchFilter -SearchBase:$OUSearchBase -propertiesToLoad:@("distinguishedName") -ErrorAction SilentlyContinue
-    if($result)
-    {
-        $resultOU = $result.distinguishedName.substring((($result.distinguishedName -replace '\,(.*)').length+1))
-        if($resultOU -ne $TargetOU)
-        {
-            #if the computer object is found in AD, remove it
-            Remove-LdapObject $result.distinguishedName -LdapConnection:$Ldap
-        }
-    }
-
-    #Try to add the computer to the domain until AD catches up
-    Retry-TestCommand -Test xAdd-Computer -Args @{DomainName=$DomainName; Credential=$cred; TargetOU=$TargetOU; args=@{Options="JoinWithNewName,AccountCreate"; Force=$true; Verbose=$true; Passthru=$true; ErrorAction="SilentlyContinue";}} -Tries $Tries -InitialDelay 10 -TestProperty "hasSucceeded"
-    Write-Host "changed=yes comment=`"Joined system to the domain [$DomainName].`" domain=$DomainName";
-
-}
-elseif($DomainJoinStatus -eq $DomainName)
-{
-    Write-Host "changed=no comment=`"System is already joined to the correct domain [$DomainName].`" domain=$DomainName"
+    $SecPassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
+    $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $UserName, $SecPassword
 }
 else
 {
-    Throw "System is joined to another domain [$DomainJoinStatus]. To join a different domain, first remove it from the current domain."
+    #Create the credential from the EncryptedPassword parameter set
+    $AesObject = New-Object System.Security.Cryptography.AesCryptoServiceProvider
+    $AesObject.IV = New-Object Byte[]($AesObject.IV.Length)
+    $AesObject.Key = [System.Convert]::FromBase64String($Key)
+    $EncryptedStringBytes = [System.Convert]::FromBase64String($EncryptedPassword)
+    $ReEncryptedPassword = ConvertTo-SecureString -String "$([System.Text.UnicodeEncoding]::Unicode.GetString(($AesObject.CreateDecryptor()).TransformFinalBlock($EncryptedStringBytes, 0, $EncryptedStringBytes.Length)))" -AsPlainText -Force
+    $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $UserName, $ReEncryptedPassword
 }
+
+#Create the ldap connection
+$Ldap = Get-LdapConnection -LdapServer:$DomainName -Credential:$cred
+
+#Create search filter using the Local Computer's NetBIOS Name
+#https://social.msdn.microsoft.com/Forums/en-US/a5690438-d9bc-4f47-b1c6-bcb35cc2d074/how-to-get-changed-computer-name-without-restarting-the-computer?forum=netfxbcl
+$ControlSetNumber = (Get-ItemProperty -path HKLM:SYSTEM\Select).Current.ToString().PadLeft(3, "0")
+$ComputerName = (get-itemproperty -path HKLM:SYSTEM\ControlSet$ControlSetNumber\Control\ComputerName\ComputerName).ComputerName
+$SearchFilter = "(&(cn=$ComputerName)(objectClass=computer))"
+
+#Convert domain name to common nameec
+$OUSearchBase = 'dc=' + $DomainName.Replace('.',',dc=')
+
+#Run LDAP search
+$result = Find-LdapObject -LdapConnection:$Ldap -SearchFilter:$SearchFilter -SearchBase:$OUSearchBase -propertiesToLoad:@("distinguishedName") -ErrorAction SilentlyContinue
+if($result)
+{
+    $resultOU = $result.distinguishedName.substring((($result.distinguishedName -replace '\,(.*)').length+1))
+    if($resultOU -ne $TargetOU)
+    {
+        #if the computer object is found in AD, remove it
+        Remove-LdapObject $result.distinguishedName -LdapConnection:$Ldap
+    }
+}
+
+#Check local system for domain join status.
+$ComputerSystem = Get-WmiObject Win32_ComputerSystem
+
+if($ComputerSystem.PartofDomain -eq $True)
+{
+    if($ComputerSystem.Domain -ne $DomainName)
+    {
+        Throw "System is joined to another domain [$($ComputerSystem.Domain)]. To join a different domain, first remove it from the current domain."
+    }
+    else
+    {
+        # Check if the computer name was updated.  If so, also remove the old computer name from AD
+        if($($ComputerSystem.Name) -ne $ComputerName)
+        {
+            $SearchFilter = "(&(cn=$($ComputerSystem.Name))(objectClass=computer))"
+            #Run LDAP search
+            $result = Find-LdapObject -LdapConnection:$Ldap -SearchFilter:$SearchFilter -SearchBase:$OUSearchBase -propertiesToLoad:@("distinguishedName") -ErrorAction SilentlyContinue
+            if($result)
+            {
+                $resultOU = $result.distinguishedName.substring((($result.distinguishedName -replace '\,(.*)').length+1))
+                if($resultOU -ne $TargetOU)
+                {
+                    #if the computer object is found in AD, remove it
+                    Remove-LdapObject $result.distinguishedName -LdapConnection:$Ldap
+                }
+            }
+        }
+
+        # Reset local domain join status
+        Write-Host "System is already configured for domain [$DomainName]. Resetting local domain state to unjoined before attempting domain join..."
+        #Remove-Computer -UnjoinDomainCredential $cred -ComputerName $ComputerSystem.Name -Force -PassThru -Verbose
+        $ComputerSystem.UnjoinDomainOrWorkgroup()
+
+    }
+}
+else
+{
+    Write-Host "System is not joined to a domain. Proceeding directly to domain join..."
+}
+
+#Try to add the computer to the domain until AD catches up
+Retry-TestCommand -Test xAdd-Computer -Args @{DomainName=$DomainName; Credential=$cred; TargetOU=$TargetOU; args=@{Options="JoinWithNewName,AccountCreate"; Force=$true; Verbose=$true; Passthru=$true; ErrorAction="SilentlyContinue";}} -Tries $Tries -InitialDelay 10 -TestProperty "hasSucceeded"
+Write-Host "changed=yes comment=`"Joined system to the domain [$DomainName].`" domain=$DomainName";
